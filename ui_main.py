@@ -225,6 +225,11 @@ class MainUI(QWidget):
         row3.addWidget(self.chk_manual, 1)
         input_layout.addLayout(row3)
 
+        # Add search hint label
+        hint_label = QLabel("💡 نصيحة: يمكنك البحث بالباركود أو كتابة أول كلمة من اسم المنتج")
+        hint_label.setStyleSheet("color: #60a5fa; font-size: 10pt; font-style: italic;")
+        input_layout.addWidget(hint_label)
+
         # Action buttons row
         row4 = QHBoxLayout()
         row4.setSpacing(10)

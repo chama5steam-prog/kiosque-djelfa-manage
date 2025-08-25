@@ -114,6 +114,21 @@ def get_item_by_barcode(barcode):
     conn.close()
     return row
 
+def search_items_by_name(name_part):
+    """Search items by partial name match"""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, barcode, price, stock_count, photo_path, category_id
+        FROM items 
+        WHERE name LIKE ? 
+        ORDER BY name
+        LIMIT 20
+    """, (f"%{name_part}%",))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
 def get_item_by_id(item_id):
     """Get product item by ID"""
     conn = get_connection()

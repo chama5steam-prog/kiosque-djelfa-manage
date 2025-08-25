@@ -55,6 +55,9 @@ class Controller(MainUI):
         self.btn_print_bill.clicked.connect(self._bill_print)
         self.btn_scanner_info.clicked.connect(self._show_scanner_info)
 
+        # Add search functionality to name field
+        self.in_name.textChanged.connect(self._on_name_text_changed)
+
         # Hardware scanner support: scanners "type" then send Enter.
         self.in_barcode.returnPressed.connect(self._handle_scanned_barcode)
 
@@ -442,26 +445,91 @@ class Controller(MainUI):
 ملاحظة: تأكد من أن الماسح مضبوط على وضع "لوحة المفاتيح"
         """
         QMessageBox.information(self, "معلومات ماسح الباركود", info_text)
+
+    def _on_name_text_changed(self):
+        """Handle name field text changes for search suggestions"""
+        text = self.in_name.text().strip()
+        if len(text) >= 2:  # Start searching after 2 characters
+            self._search_items_by_name(text)
+
+    def _search_items_by_name(self, name_part):
+        """Search items by partial name and show suggestions"""
+        try:
+            items = models.search_items_by_name(name_part)
+            if items:
+                # For now, auto-fill with the first match
+                # You could implement a dropdown suggestion list here
+                first_item = items[0]
+                current_text = self.in_name.text()
+                
+                # Only auto-fill if user hasn't typed the full name yet
+                if len(current_text) < len(first_item["name"]) and first_item["name"].lower().startswith(current_text.lower()):
+                    # Temporarily disconnect to avoid recursive calls
+                    self.in_name.textChanged.disconnect()
+                    
+                    # Set the full name and select the auto-completed part
+                    self.in_name.setText(first_item["name"])
+                    self.in_name.setSelection(len(current_text), len(first_item["name"]) - len(current_text))
+                    
+                    # Auto-fill other fields
+                    self.in_barcode.setText(first_item["barcode"] or "")
+                    if self.chk_manual.currentIndex() == 0:  # Use DB price
+                        self.in_price.setValue(float(first_item["price"]))
+                    
+                    # Reconnect the signal
+                    self.in_name.textChanged.connect(self._on_name_text_changed)
+        except Exception as e:
+            pass  # Silently handle search errors
+
     def _bill_find(self):
         """Find item by barcode and populate fields"""
         barcode = self.in_barcode.text().strip()
-        if not barcode:
-            self.msg("تنبيه", "أدخل الباركود أولًا.")
+        name = self.in_name.text().strip()
+        
+        if not barcode and not name:
+            self.msg("تنبيه", "أدخل الباركود أو اسم المنتج للبحث.")
             return
+        
+        item = None
+        
+        # Search by barcode first if provided
+        if barcode:
+            if not is_valid_barcode(barcode):
+                self.msg("خطأ", "الباركود يجب أن يكون أرقامًا صحيحة (EAN-13: 13 رقم، UPC-A: 12 رقم، EAN-8: 8 أرقام)")
+                return
+            item = models.get_item_by_barcode(barcode)
+        
+        # If not found by barcode, search by name
+        if not item and name:
+            items = models.search_items_by_name(name)
+            if items:
+                # If multiple matches, use the first exact match or the first partial match
+                for i in items:
+                    if i["name"].lower() == name.lower():
+                        item = i
+                        break
+                if not item:
+                    item = items[0]  # Use first match
             
-        if not is_valid_barcode(barcode):
-            self.msg("خطأ", "الباركود يجب أن يكون أرقامًا صحيحة (EAN-13: 13 رقم، UPC-A: 12 رقم، EAN-8: 8 أرقام)")
-            return
-            
-        item = models.get_item_by_barcode(barcode)
         if item:
             self.in_name.setText(item["name"])
+            self.in_barcode.setText(item["barcode"] or "")
             if self.chk_manual.currentIndex() == 0:
                 self.in_price.setValue(float(item["price"]))
-            if (item["stock_count"] or 0) <= 0:
+            
+            # Show stock information
+            stock = item["stock_count"] or 0
+            if stock <= 0:
                 QMessageBox.warning(self, "نفد المخزون", "هذا المنتج نفد من المخزون. يمكنك تحديث كميته من تبويب المخزون.")
+            else:
+                # Set maximum quantity to available stock
+                self.in_qty.setMaximum(stock)
+                if self.in_qty.value() > stock:
+                    self.in_qty.setValue(stock)
+                self.msg("معلومات المخزون", f"المتاح في المخزون: {stock:.0f if stock == int(stock) else stock:.1f}")
         else:
-            self.msg("ملاحظة", "لم يتم العثور على منتج بهذا الباركود. يمكنك إدخاله يدويًا وإضافته للمخزون لاحقًا.")
+            search_term = barcode if barcode else name
+            self.msg("ملاحظة", f"لم يتم العثور على منتج بـ '{search_term}'. يمكنك إدخاله يدويًا وإضافته للمخزون لاحقًا.")
 
     def _bill_add(self, auto_from_scan=False):
         """Add item to current bill with real-time stock deduction"""
@@ -476,6 +544,10 @@ class Controller(MainUI):
             return
             
         price_each = float(self.in_price.value())
+        if price_each <= 0:
+            self.msg("تنبيه", "السعر يجب أن يكون أكبر من صفر.")
+            return
+            
         qty = float(self.in_qty.value())
         if qty <= 0:
             self.msg("تنبيه", "الكمية يجب أن تكون أكبر من صفر.")
@@ -483,51 +555,134 @@ class Controller(MainUI):
 
         # Get item from database
         item = models.get_item_by_barcode(barcode) if barcode else None
+        
+        # If no barcode, try to find by name
+        if not item and name:
+            items = models.search_items_by_name(name)
+            if items:
+                # Find exact match first
+                for i in items:
+                    if i["name"].lower() == name.lower():
+                        item = i
+                        break
+                if not item:
+                    item = items[0]  # Use first match
+        
         item_id = item["id"] if item else None
         
-        # Check stock availability
-        if item and (item["stock_count"] or 0) < qty:
-            reply = QMessageBox.question(
-                self, "تنبيه المخزون", 
-                f"الكمية المطلوبة ({qty:.0f if qty == int(qty) else qty}) أكبر من المتاح ({item['stock_count']:.0f if item['stock_count'] == int(item['stock_count']) else item['stock_count']}).\n"
-                "هل تريد المتابعة؟ سيصبح المخزون سالبًا.",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.No:
+        # Check stock availability - STRICT validation
+        if item:
+            available_stock = item["stock_count"] or 0
+            if available_stock < qty:
+                if available_stock <= 0:
+                    self.msg("خطأ في المخزون", "هذا المنتج نفد من المخزون. لا يمكن إضافته للفاتورة.")
+                    return
+                else:
+                    # Suggest maximum available quantity
+                    reply = QMessageBox.question(
+                        self, "تجاوز المخزون المتاح", 
+                        f"الكمية المطلوبة ({qty:.0f if qty == int(qty) else qty:.1f}) أكبر من المتاح ({available_stock:.0f if available_stock == int(available_stock) else available_stock:.1f}).\n\n"
+                        f"هل تريد إضافة الحد الأقصى المتاح ({available_stock:.0f if available_stock == int(available_stock) else available_stock:.1f}) بدلاً من ذلك؟",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        qty = available_stock
+                        self.in_qty.setValue(qty)
+                    else:
+                        return
+
+        # Double-check: ensure we don't exceed available stock
+        if item and qty > (item["stock_count"] or 0):
+            self.msg("خطأ", "لا يمكن إضافة كمية أكبر من المتاح في المخزون.")
+            return
+
+        # Check if item already exists in current bill
+        existing_row = None
+        for r in range(self.tbl_bill.rowCount()):
+            existing_barcode = self.tbl_bill.item(r, 0).text() if self.tbl_bill.item(r, 0) else ""
+            existing_name = self.tbl_bill.item(r, 1).text() if self.tbl_bill.item(r, 1) else ""
+            
+            if (barcode and existing_barcode == barcode) or (existing_name == name):
+                existing_row = r
+                break
+        
+        if existing_row is not None:
+            # Update existing item quantity
+            existing_qty_item = self.tbl_bill.item(existing_row, 3)
+            existing_qty = float(existing_qty_item.text()) if existing_qty_item else 0
+            new_total_qty = existing_qty + qty
+            
+            # Check if new total exceeds stock
+            if item and new_total_qty > (item["stock_count"] or 0):
+                max_additional = (item["stock_count"] or 0) - existing_qty
+                if max_additional <= 0:
+                    self.msg("تنبيه", "هذا المنتج موجود بالفعل في الفاتورة بالحد الأقصى المتاح.")
+                    return
+                else:
+                    reply = QMessageBox.question(
+                        self, "تحديث الكمية", 
+                        f"هذا المنتج موجود بالفعل في الفاتورة بكمية {existing_qty:.0f if existing_qty == int(existing_qty) else existing_qty:.1f}.\n"
+                        f"يمكن إضافة {max_additional:.0f if max_additional == int(max_additional) else max_additional:.1f} فقط.\n\n"
+                        f"هل تريد إضافة الحد الأقصى المتاح؟",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        qty = max_additional
+                        new_total_qty = existing_qty + qty
+                    else:
+                        return
+            
+            # Update the existing row
+            new_subtotal = price_each * new_total_qty
+            
+            qty_text = f"{new_total_qty:.0f}" if new_total_qty == int(new_total_qty) else f"{new_total_qty:.1f}"
+            subtotal_text = f"{new_subtotal:.0f}" if new_subtotal == int(new_subtotal) else f"{new_subtotal:.2f}"
+            
+            self.tbl_bill.setItem(existing_row, 3, QTableWidgetItem(qty_text))
+            self.tbl_bill.setItem(existing_row, 4, QTableWidgetItem(f"{subtotal_text} {self.currency}"))
+            
+            # Adjust stock for the additional quantity only
+            if item_id:
+                try:
+                    models.adjust_stock(item_id, -qty)
+                    self._load_stock_table()
+                except Exception as e:
+                    QMessageBox.warning(self, "خطأ في المخزون", f"تعذر تحديث المخزون:\n{e}")
                 return
 
         subtotal = price_each * qty
         
-        # Add to bill table
-        row = self.tbl_bill.rowCount()
-        self.tbl_bill.insertRow(row)
+        else:
+            # Add new row to bill table
+            row = self.tbl_bill.rowCount()
+            self.tbl_bill.insertRow(row)
 
-        self.tbl_bill.setItem(row, 0, QTableWidgetItem(barcode or ""))
-        
-        # Name with larger font
-        name_item = QTableWidgetItem(name)
-        name_item.setFont(self._bill_name_font)
-        self.tbl_bill.setItem(row, 1, name_item)
+            self.tbl_bill.setItem(row, 0, QTableWidgetItem(barcode or ""))
+            
+            # Name with larger font
+            name_item = QTableWidgetItem(name)
+            name_item.setFont(self._bill_name_font)
+            self.tbl_bill.setItem(row, 1, name_item)
 
-        price_text = f"{price_each:.0f}" if price_each == int(price_each) else f"{price_each:.2f}"
-        qty_text = f"{qty:.0f}" if qty == int(qty) else f"{qty:.1f}"
-        subtotal_text = f"{subtotal:.0f}" if subtotal == int(subtotal) else f"{subtotal:.2f}"
-        
-        self.tbl_bill.setItem(row, 2, QTableWidgetItem(f"{price_text} {self.currency}"))
-        self.tbl_bill.setItem(row, 3, QTableWidgetItem(qty_text))
-        self.tbl_bill.setItem(row, 4, QTableWidgetItem(f"{subtotal_text} {self.currency}"))
-        self.tbl_bill.setItem(row, 5, QTableWidgetItem(str(item_id) if item_id else ""))
+            price_text = f"{price_each:.0f}" if price_each == int(price_each) else f"{price_each:.2f}"
+            qty_text = f"{qty:.0f}" if qty == int(qty) else f"{qty:.1f}"
+            subtotal_text = f"{subtotal:.0f}" if subtotal == int(subtotal) else f"{subtotal:.2f}"
+            
+            self.tbl_bill.setItem(row, 2, QTableWidgetItem(f"{price_text} {self.currency}"))
+            self.tbl_bill.setItem(row, 3, QTableWidgetItem(qty_text))
+            self.tbl_bill.setItem(row, 4, QTableWidgetItem(f"{subtotal_text} {self.currency}"))
+            self.tbl_bill.setItem(row, 5, QTableWidgetItem(str(item_id) if item_id else ""))
 
-        # Set row height for better readability
-        self.tbl_bill.setRowHeight(row, 45)
+            # Set row height for better readability
+            self.tbl_bill.setRowHeight(row, 45)
 
-        # Real-time stock deduction
-        if item_id:
-            try:
-                models.adjust_stock(item_id, -qty)
-                self._load_stock_table()  # Refresh stock display
-            except Exception as e:
-                QMessageBox.warning(self, "خطأ في المخزون", f"تعذر تحديث المخزون:\n{e}")
+            # Real-time stock deduction
+            if item_id:
+                try:
+                    models.adjust_stock(item_id, -qty)
+                    self._load_stock_table()  # Refresh stock display
+                except Exception as e:
+                    QMessageBox.warning(self, "خطأ في المخزون", f"تعذر تحديث المخزون:\n{e}")
 
         self._bill_recalc_total()
 
@@ -537,6 +692,7 @@ class Controller(MainUI):
             if self.chk_manual.currentIndex() == 0:
                 self.in_price.setValue(0)
             self.in_qty.setValue(1.0)
+            self.in_qty.setMaximum(10**9)  # Reset quantity limit
 
         self.in_barcode.clear()
         self.in_barcode.setFocus()
