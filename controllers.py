@@ -648,12 +648,11 @@ class Controller(MainUI):
                     self._load_stock_table()
                 except Exception as e:
                     QMessageBox.warning(self, "خطأ في المخزون", f"تعذر تحديث المخزون:\n{e}")
-                return
 
-        subtotal = price_each * qty
-        
+                    return
         else:
             # Add new row to bill table
+            subtotal = price_each * qty
             row = self.tbl_bill.rowCount()
             self.tbl_bill.insertRow(row)
 
